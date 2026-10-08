@@ -91,7 +91,8 @@ export const getMyGatePasses = async (req, res) => {
         }
         return {
           ...p,
-          qrDataUrl
+          qr_code_data_url: qrDataUrl
+          
         };
       })
     );

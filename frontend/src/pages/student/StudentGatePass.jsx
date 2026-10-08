@@ -40,13 +40,21 @@ export default function StudentGatePass() {
     setSubmitting(true);
     setError('');
     try {
-      await api.post('/security/gate-passes/request', form);
+      await api.post('/security/gate-passes/request', {
+  reason: form.reason,
+  departureTime: form.departure_time,
+  expectedReturnTime: form.expected_return_time
+});
       setSuccess('Gate pass request submitted successfully!');
       setShowForm(false);
       setForm({ reason: '', departure_time: '', expected_return_time: '', destination: '' });
       loadPasses();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to submit request');
+      setError(
+  err.response?.data?.message ||
+  err.response?.data?.error ||
+  'Failed to submit request'
+               );
     } finally {
       setSubmitting(false);
     }
