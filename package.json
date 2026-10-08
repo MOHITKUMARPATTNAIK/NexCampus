@@ -1,0 +1,14 @@
+{
+  "name": "nexcampus",
+  "version": "1.0.0",
+  "description": "NexCampus Smart Campus Management Platform",
+  "scripts": {
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "migrate": "cd backend && npm run migrate",
+    "seed": "cd backend && npm run seed",
+    "db:test": "cd backend && npm run db:test",
+    "test": "cd backend && npm test",
+    "build": "cd frontend && npm run build"
+  }
+}
