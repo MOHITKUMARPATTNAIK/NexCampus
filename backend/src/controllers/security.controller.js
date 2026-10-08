@@ -9,6 +9,7 @@ import { logAudit } from '../utils/auditLogger.js';
 
 export const requestGatePass = async (req, res) => {
   const { reason, departureTime, expectedReturnTime } = req.body;
+  console.log('GATE PASS DATA:', { reason, departureTime, expectedReturnTime });
 
   if (!reason || !departureTime || !expectedReturnTime) {
     return res.status(400).json({
