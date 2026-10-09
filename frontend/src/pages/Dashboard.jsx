@@ -39,10 +39,10 @@ export const Dashboard = () => {
 
   const isSuperAdmin = user.isSuperAdmin;
   const isCMO = user.isCMO;
-  const isStudent = user.roles.includes('student');
-  const isGuard = user.roles.includes('security_guard');
-  const isFaculty = user.roles.includes('faculty');
-  const isDelegatedAdmin = user.roles.includes('delegated_admin');
+  const isStudent = user.roles?.includes('student') || user.role === 'student';
+  const isGuard = user.roles?.includes('security_guard') || user.role === 'security_guard';
+  const isFaculty = user.roles?.includes('faculty') || user.role === 'faculty';
+  const isDelegatedAdmin = user.roles?.includes('delegated_admin') || user.role === 'delegated_admin';
 
   useEffect(() => {
     let mounted = true;
@@ -126,7 +126,7 @@ export const Dashboard = () => {
           <div className="flex flex-wrap items-center gap-3">
             <div className="px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
               <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">{t('dashboard.accountRole', 'Account Role')}</span>
-              <span className="font-bold text-slate-800 capitalize">{user.roles.join(', ').replace(/_/g, ' ')}</span>
+              <span className="font-bold text-slate-800 capitalize">{Array.isArray(user.roles) ? user.roles.join(', ').replace(/_/g, ' ') : (user.role || 'Staff')}</span>
             </div>
             <div className="px-4 py-2.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
               <span className="text-slate-400 block text-[10px] uppercase font-bold tracking-wider">{t('dashboard.status', 'Status')}</span>

@@ -24,10 +24,12 @@ export default function GatePassApprovals() {
     try {
       setLoading(true);
       setError('');
-      const res = await api.get('/security/gate-passes/pending');
+      const res = await api.get('/security/gate-passes/pending', {
+        params: { status: 'all' }
+      });
       setPasses(res.data.passes || []);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to load gate passes');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to load gate passes');
     } finally {
       setLoading(false);
     }
@@ -42,7 +44,7 @@ export default function GatePassApprovals() {
       setSuccess(`Gate pass ${passNumber} approved.`);
       loadPasses();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to approve');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to approve');
     } finally {
       setActionLoading(false);
     }
@@ -55,6 +57,7 @@ export default function GatePassApprovals() {
     try {
       await api.patch(`/security/gate-passes/${rejectModal.passId}/review`, {
         verdict: 'rejected',
+        rejectionReason: rejectReason.trim(),
         rejection_reason: rejectReason.trim()
       });
       setSuccess(`Gate pass ${rejectModal.passNumber} rejected.`);
@@ -62,7 +65,7 @@ export default function GatePassApprovals() {
       setRejectReason('');
       loadPasses();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to reject');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to reject');
     } finally {
       setActionLoading(false);
     }
@@ -71,11 +74,11 @@ export default function GatePassApprovals() {
   const fmt = (dt) => dt ? new Date(dt).toLocaleString() : '—';
 
   const counts = TABS.reduce((acc, t) => {
-    acc[t.key] = passes.filter(p => p.status === t.key).length;
+    acc[t.key] = passes.filter(p => (t.key === 'approved' ? (p.status === 'approved' || p.status === 'active') : p.status === t.key)).length;
     return acc;
   }, {});
 
-  const visible = passes.filter(p => p.status === activeTab);
+  const visible = passes.filter(p => (activeTab === 'approved' ? (p.status === 'approved' || p.status === 'active') : p.status === activeTab));
 
   return (
     <div className="space-y-6">

@@ -84,7 +84,14 @@ export const AuthProvider = ({ children }) => {
   const hasRole = (role) => {
     if (!user) return false;
     if (user.isSuperAdmin) return true;
-    return user.roles && user.roles.includes(role);
+    if (Array.isArray(user.roles)) {
+      if (user.roles.includes(role)) return true;
+      if (user.roles.some((r) => (typeof r === 'object' ? r?.name === role : r === role))) return true;
+    }
+    if (typeof user.role === 'string') {
+      return user.role === role;
+    }
+    return false;
   };
 
   const hasPermission = (permission) => {

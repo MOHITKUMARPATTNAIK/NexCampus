@@ -7,41 +7,96 @@ import { logAudit } from '../utils/auditLogger.js';
 
 /** POST /api/complaints — student submits a complaint */
 export const submitComplaint = async (req, res) => {
-  const { category_id, title, description, location, priority } = req.body;
-  if (!title?.trim() || !description?.trim()) {
-    return res.status(400).json({ error: 'Title and description are required' });
-  }
-  try {
-    // Auto-generate complaint number
-    const countRes = await pool.query('SELECT COUNT(*) FROM complaints');
-    const complaintNumber = `CMP-${new Date().getFullYear()}-${String(Number(countRes.rows[0].count) + 1).padStart(5, '0')}`;
+const { category_id, title, description, location, priority } = req.body;
+
+if (!title?.trim() || !description?.trim()) {
+return res.status(400).json({
+error: 'Title and description are required'
+});
+}
+
+try {
+const countRes = await pool.query(
+'SELECT COUNT(*) FROM complaints'
+);
+
+    let refSeq = Number(countRes.rows[0].count) + 1;
+    let complaintRef = `CMP-${new Date().getFullYear()}-${String(refSeq).padStart(5, '0')}`;
+    const existingRef = await pool.query('SELECT 1 FROM complaints WHERE complaint_ref = $1', [complaintRef]);
+    if (existingRef.rows.length > 0) {
+      complaintRef = `CMP-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}`;
+    }
+
+    const urgencyMap = {
+      low: 'low',
+      medium: 'normal',
+      normal: 'normal',
+      high: 'high',
+      urgent: 'high',
+      critical: 'emergency',
+      emergency: 'emergency'
+    };
+
+    const urgency = urgencyMap[String(priority || 'medium').toLowerCase()] || 'normal';
+    const resolvedLocation = (location && location.trim()) || 'Campus / General';
+    const resolvedCategoryId = (category_id && String(category_id).trim()) ? String(category_id).trim() : null;
 
     const { rows } = await pool.query(
       `INSERT INTO complaints
-         (complaint_number, submitted_by, category_id, title, description, location, priority, status)
-       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'medium'), 'open')
+        (complaint_ref, student_id, category_id, title, description, location, urgency, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'submitted')
        RETURNING *`,
-      [complaintNumber, req.user.id, category_id || null, title.trim(), description.trim(), location || null, priority]
+      [
+        complaintRef,
+        req.user.id,
+        resolvedCategoryId,
+        title.trim(),
+        description.trim(),
+        resolvedLocation,
+        urgency
+      ]
     );
-    await logAudit({ actorId: req.user.id, action: 'COMPLAINT_SUBMIT', targetType: 'complaint', targetId: rows[0].id, details: { complaintNumber, title } });
-    res.status(201).json({ complaint: rows[0] });
-  } catch (err) {
-    console.error('[complaints] submitComplaint:', err.message);
-    res.status(500).json({ error: 'Failed to submit complaint' });
-  }
+
+await logAudit({
+  actorId: req.user.id,
+  action: 'COMPLAINT_SUBMIT',
+  targetType: 'complaint',
+  targetId: rows[0].id
+});
+
+const complaintData = {
+  ...rows[0],
+  complaint_number: rows[0].complaint_ref,
+  priority: rows[0].urgency
+};
+
+return res.status(201).json({
+  success: true,
+  complaint: complaintData
+});
+
+} catch (err) {
+console.error('[complaints] submitComplaint:', err.message);
+return res.status(500).json({
+error: 'Failed to submit complaint'
+});
+}
 };
 
 /** GET /api/complaints/my-complaints — student's own complaints */
 export const getMyComplaints = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT c.*, cc.name AS category_name,
+      `SELECT c.*,
+              c.complaint_ref AS complaint_number,
+              c.urgency AS priority,
+              cc.name AS category_name,
               u_cmo.full_name AS assigned_cmo_name,
-              (SELECT cu.update_text FROM complaint_updates cu WHERE cu.complaint_id = c.id ORDER BY cu.created_at DESC LIMIT 1) AS latest_update
+              (SELECT cu.comment FROM complaint_updates cu WHERE cu.complaint_id = c.id ORDER BY cu.created_at DESC LIMIT 1) AS latest_update
        FROM complaints c
        LEFT JOIN complaint_categories cc ON cc.id = c.category_id
        LEFT JOIN users u_cmo ON u_cmo.id = c.assigned_cmo_id
-       WHERE c.submitted_by = $1
+       WHERE c.student_id = $1
        ORDER BY c.created_at DESC`,
       [req.user.id]
     );
@@ -63,26 +118,60 @@ export const listAllComplaints = async (req, res) => {
     const conditions = [];
     const values = [];
     let idx = 1;
-    if (status)          { conditions.push(`c.status = $${idx++}`); values.push(status); }
-    if (priority)        { conditions.push(`c.priority = $${idx++}`); values.push(priority); }
-    if (category_id)     { conditions.push(`c.category_id = $${idx++}`); values.push(category_id); }
-    if (assigned_cmo_id) { conditions.push(`c.assigned_cmo_id = $${idx++}`); values.push(assigned_cmo_id); }
+
+    if (status) {
+      if (status === 'open') {
+        conditions.push(`c.status IN ('open', 'submitted')`);
+      } else if (status === 'escalated') {
+        conditions.push(`(c.is_escalated = true OR c.status = 'escalated')`);
+      } else {
+        conditions.push(`c.status = $${idx++}`);
+        values.push(status);
+      }
+    }
+
+    if (priority) {
+      const priorityMap = {
+        critical: 'emergency',
+        emergency: 'emergency',
+        high: 'high',
+        medium: 'normal',
+        normal: 'normal',
+        low: 'low'
+      };
+      const mappedUrgency = priorityMap[String(priority).toLowerCase()] || priority;
+      conditions.push(`c.urgency = $${idx++}`);
+      values.push(mappedUrgency);
+    }
+
+    if (category_id) {
+      conditions.push(`c.category_id = $${idx++}`);
+      values.push(category_id);
+    }
+
+    if (assigned_cmo_id) {
+      conditions.push(`c.assigned_cmo_id = $${idx++}`);
+      values.push(assigned_cmo_id);
+    }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const offset = (Number(page) - 1) * Number(limit);
 
     const { rows } = await pool.query(
-      `SELECT c.*, cc.name AS category_name,
+      `SELECT c.*,
+              c.complaint_ref AS complaint_number,
+              c.urgency AS priority,
+              cc.name AS category_name,
               u_sub.full_name AS submitted_by_name,
               u_cmo.full_name AS assigned_cmo_name,
-              (SELECT cu.update_text FROM complaint_updates cu WHERE cu.complaint_id = c.id ORDER BY cu.created_at DESC LIMIT 1) AS latest_update
+              (SELECT cu.comment FROM complaint_updates cu WHERE cu.complaint_id = c.id ORDER BY cu.created_at DESC LIMIT 1) AS latest_update
        FROM complaints c
        LEFT JOIN complaint_categories cc ON cc.id = c.category_id
-       LEFT JOIN users u_sub ON u_sub.id = c.submitted_by
+       LEFT JOIN users u_sub ON u_sub.id = c.student_id
        LEFT JOIN users u_cmo ON u_cmo.id = c.assigned_cmo_id
        ${where}
        ORDER BY
-         CASE c.priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
+         CASE c.urgency WHEN 'emergency' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,
          c.created_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
       [...values, Number(limit), offset]
@@ -105,12 +194,15 @@ export const getComplaintDetail = async (req, res) => {
   try {
     // Complaint record
     const compRes = await pool.query(
-      `SELECT c.*, cc.name AS category_name,
+      `SELECT c.*,
+              c.complaint_ref AS complaint_number,
+              c.urgency AS priority,
+              cc.name AS category_name,
               u_sub.full_name AS submitted_by_name, u_sub.email AS submitted_by_email,
               u_cmo.full_name AS assigned_cmo_name
        FROM complaints c
        LEFT JOIN complaint_categories cc ON cc.id = c.category_id
-       LEFT JOIN users u_sub ON u_sub.id = c.submitted_by
+       LEFT JOIN users u_sub ON u_sub.id = c.student_id
        LEFT JOIN users u_cmo ON u_cmo.id = c.assigned_cmo_id
        WHERE c.id = $1`,
       [id]
@@ -119,15 +211,17 @@ export const getComplaintDetail = async (req, res) => {
 
     const complaint = compRes.rows[0];
     // Access control: student can only see own complaints
-    if (req.user.roles?.includes('student') && complaint.submitted_by !== req.user.id) {
+    if (req.user.roles?.includes('student') && complaint.student_id !== req.user.id) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
     // Updates / timeline
     const updatesRes = await pool.query(
-      `SELECT cu.*, u.full_name AS author_name
+      `SELECT cu.*,
+              cu.comment AS update_text,
+              u.full_name AS author_name
        FROM complaint_updates cu
-       JOIN users u ON u.id = cu.author_id
+       LEFT JOIN users u ON u.id = cu.updated_by_user_id
        WHERE cu.complaint_id = $1
        ORDER BY cu.created_at ASC`,
       [id]
@@ -135,10 +229,15 @@ export const getComplaintDetail = async (req, res) => {
 
     // Assignments
     const assignRes = await pool.query(
-      `SELECT ca.*, u.full_name AS assigned_to_name, u2.full_name AS assigned_by_name
+      `SELECT ca.*,
+              ca.assignment_notes AS notes,
+              ca.assigned_to_user_id AS assigned_to,
+              ca.assigned_by_user_id AS assigned_by,
+              u.full_name AS assigned_to_name,
+              u2.full_name AS assigned_by_name
        FROM complaint_assignments ca
-       JOIN users u ON u.id = ca.assigned_to
-       JOIN users u2 ON u2.id = ca.assigned_by
+       LEFT JOIN users u ON u.id = ca.assigned_to_user_id
+       LEFT JOIN users u2 ON u2.id = ca.assigned_by_user_id
        WHERE ca.complaint_id = $1
        ORDER BY ca.created_at DESC`,
       [id]
@@ -158,33 +257,33 @@ export const getComplaintDetail = async (req, res) => {
 /** PATCH /api/complaints/:id/assign — CMO assigns complaint to staff/department */
 export const assignComplaint = async (req, res) => {
   const { id } = req.params;
-  const { assigned_to, notes, expected_resolution_date } = req.body;
+  const { assigned_to, notes } = req.body;
   if (!assigned_to) return res.status(400).json({ error: 'assigned_to (user ID) is required' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Mark previous active assignments inactive
+    // Mark previous pending assignments as completed
     await client.query(
-      `UPDATE complaint_assignments SET is_active = false WHERE complaint_id = $1`,
+      `UPDATE complaint_assignments SET status = 'completed', updated_at = NOW() WHERE complaint_id = $1 AND status = 'pending'`,
       [id]
     );
     // Create new assignment
     const { rows: assignRows } = await client.query(
-      `INSERT INTO complaint_assignments (complaint_id, assigned_to, assigned_by, notes, expected_resolution_date)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [id, assigned_to, req.user.id, notes || null, expected_resolution_date || null]
+      `INSERT INTO complaint_assignments (complaint_id, assigned_to_user_id, assigned_by_user_id, assignment_notes, status)
+       VALUES ($1, $2, $3, $4, 'pending') RETURNING *`,
+      [id, assigned_to, req.user.id, notes || null]
     );
-    // Update complaint status to 'in_progress' and record CMO
+    // Update complaint status to 'assigned' and record CMO
     await client.query(
-      `UPDATE complaints SET status = 'in_progress', assigned_cmo_id = $1, updated_at = NOW()
+      `UPDATE complaints SET status = 'assigned', assigned_cmo_id = $1, updated_at = NOW()
        WHERE id = $2`,
       [req.user.id, id]
     );
     // Add update entry
     await client.query(
-      `INSERT INTO complaint_updates (complaint_id, author_id, update_text, update_type)
-       VALUES ($1, $2, $3, 'assignment')`,
+      `INSERT INTO complaint_updates (complaint_id, updated_by_user_id, new_status, comment, is_internal)
+       VALUES ($1, $2, 'assigned', $3, false)`,
       [id, req.user.id, notes ? `Assigned to staff. Notes: ${notes}` : 'Complaint assigned to resolution staff.']
     );
 
@@ -205,41 +304,51 @@ export const updateComplaintStatus = async (req, res) => {
   const { id } = req.params;
   const { status, update_text, resolution_notes } = req.body;
 
-  const VALID_STATUSES = ['open', 'in_progress', 'resolved', 'closed', 'escalated', 'rejected'];
-  if (!status || !VALID_STATUSES.includes(status)) {
-    return res.status(400).json({ error: `status must be one of: ${VALID_STATUSES.join(', ')}` });
+  const STATUS_MAP = {
+    open: 'submitted',
+    submitted: 'submitted',
+    assigned: 'assigned',
+    in_progress: 'in_progress',
+    awaiting_information: 'awaiting_information',
+    resolution_pending_verification: 'resolution_pending_verification',
+    resolved: 'resolved',
+    closed: 'closed',
+    reopened: 'reopened',
+    escalated: 'in_progress',
+    rejected: 'closed'
+  };
+
+  const targetStatus = STATUS_MAP[status];
+  if (!status || !targetStatus) {
+    return res.status(400).json({ error: `Invalid status: ${status}` });
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const updateFields = ['status = $1', 'updated_at = NOW()'];
-    const values = [status];
-    let idx = 2;
-
-    if (status === 'resolved') {
-      updateFields.push(`resolved_at = NOW()`);
-      if (resolution_notes) { updateFields.push(`resolution_notes = $${idx++}`); values.push(resolution_notes); }
+    const compRes = await client.query('SELECT status FROM complaints WHERE id = $1', [id]);
+    if (!compRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Complaint not found' });
     }
-    values.push(id);
+    const oldStatus = compRes.rows[0].status;
 
     await client.query(
-      `UPDATE complaints SET ${updateFields.join(', ')} WHERE id = $${idx}`,
-      values
+      `UPDATE complaints SET status = $1, is_escalated = (CASE WHEN $2 = 'escalated' THEN true ELSE is_escalated END), updated_at = NOW() WHERE id = $3`,
+      [targetStatus, status, id]
     );
 
     // Add timeline update
-    if (update_text?.trim()) {
-      await client.query(
-        `INSERT INTO complaint_updates (complaint_id, author_id, update_text, update_type)
-         VALUES ($1, $2, $3, $4)`,
-        [id, req.user.id, update_text.trim(), status === 'resolved' ? 'resolution' : 'status_change']
-      );
-    }
+    const comment = update_text?.trim() || resolution_notes?.trim() || `Status updated from ${oldStatus} to ${targetStatus}`;
+    await client.query(
+      `INSERT INTO complaint_updates (complaint_id, updated_by_user_id, old_status, new_status, comment, is_internal)
+       VALUES ($1, $2, $3, $4, $5, false)`,
+      [id, req.user.id, oldStatus, targetStatus, comment]
+    );
 
-    await logAudit({ actorId: req.user.id, action: 'COMPLAINT_STATUS_UPDATE', targetType: 'complaint', targetId: id, details: { status } });
+    await logAudit({ actorId: req.user.id, action: 'COMPLAINT_STATUS_UPDATE', targetType: 'complaint', targetId: id, details: { status: targetStatus } });
     await client.query('COMMIT');
-    res.json({ message: `Complaint status updated to: ${status}` });
+    res.json({ message: `Complaint status updated to: ${targetStatus}` });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[complaints] updateComplaintStatus:', err.message);
@@ -252,16 +361,17 @@ export const updateComplaintStatus = async (req, res) => {
 /** POST /api/complaints/:id/update — add timeline update/note */
 export const addComplaintUpdate = async (req, res) => {
   const { id } = req.params;
-  const { update_text, update_type, is_internal } = req.body;
+  const { update_text, is_internal } = req.body;
   if (!update_text?.trim()) return res.status(400).json({ error: 'update_text is required' });
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO complaint_updates (complaint_id, author_id, update_text, update_type, is_internal)
-       VALUES ($1, $2, $3, COALESCE($4, 'note'), COALESCE($5, false))
-       RETURNING *`,
-      [id, req.user.id, update_text.trim(), update_type, is_internal]
+      `INSERT INTO complaint_updates (complaint_id, updated_by_user_id, comment, is_internal)
+       VALUES ($1, $2, $3, COALESCE($4, false))
+       RETURNING *, comment AS update_text`,
+      [id, req.user.id, update_text.trim(), is_internal]
     );
+    await pool.query('UPDATE complaints SET updated_at = NOW() WHERE id = $1', [id]);
     res.status(201).json({ update: rows[0] });
   } catch (err) {
     console.error('[complaints] addComplaintUpdate:', err.message);
@@ -284,12 +394,12 @@ export const escalateComplaint = async (req, res) => {
       [id, req.user.id, escalated_to || null, reason.trim()]
     );
     await client.query(
-      `UPDATE complaints SET status = 'escalated', updated_at = NOW() WHERE id = $1`,
+      `UPDATE complaints SET is_escalated = true, updated_at = NOW() WHERE id = $1`,
       [id]
     );
     await client.query(
-      `INSERT INTO complaint_updates (complaint_id, author_id, update_text, update_type, is_internal)
-       VALUES ($1, $2, $3, 'escalation', true)`,
+      `INSERT INTO complaint_updates (complaint_id, updated_by_user_id, comment, is_internal)
+       VALUES ($1, $2, $3, true)`,
       [id, req.user.id, `Escalated: ${reason.trim()}`]
     );
     await logAudit({ actorId: req.user.id, action: 'COMPLAINT_ESCALATE', targetType: 'complaint', targetId: id, details: { reason } });
@@ -320,14 +430,15 @@ export const reopenComplaint = async (req, res) => {
       return res.status(400).json({ error: 'Only resolved or closed complaints can be reopened' });
     }
 
+    const oldStatus = compRes.rows[0].status;
     await client.query(
-      `UPDATE complaints SET status = 'in_progress', resolved_at = NULL, resolution_notes = NULL, updated_at = NOW() WHERE id = $1`,
+      `UPDATE complaints SET status = 'reopened', updated_at = NOW() WHERE id = $1`,
       [id]
     );
     await client.query(
-      `INSERT INTO complaint_updates (complaint_id, author_id, update_text, update_type)
-       VALUES ($1, $2, $3, 'reopen')`,
-      [id, req.user.id, `Complaint reopened. Reason: ${reason.trim()}`]
+      `INSERT INTO complaint_updates (complaint_id, updated_by_user_id, old_status, new_status, comment)
+       VALUES ($1, $2, $3, 'reopened', $4)`,
+      [id, req.user.id, oldStatus, `Complaint reopened. Reason: ${reason.trim()}`]
     );
 
     await logAudit({ actorId: req.user.id, action: 'COMPLAINT_REOPEN', targetType: 'complaint', targetId: id, details: { reason } });
@@ -357,17 +468,27 @@ export const getComplaintStats = async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'open')        AS open_count,
-         COUNT(*) FILTER (WHERE status = 'in_progress') AS in_progress_count,
-         COUNT(*) FILTER (WHERE status = 'resolved')    AS resolved_count,
-         COUNT(*) FILTER (WHERE status = 'escalated')   AS escalated_count,
-         COUNT(*) FILTER (WHERE priority = 'critical')  AS critical_count,
-         COUNT(*) FILTER (WHERE priority = 'high')      AS high_count,
+         COUNT(*) FILTER (WHERE status IN ('submitted', 'open')) AS open_count,
+         COUNT(*) FILTER (WHERE status = 'in_progress')          AS in_progress_count,
+         COUNT(*) FILTER (WHERE status = 'resolved')             AS resolved_count,
+         COUNT(*) FILTER (WHERE is_escalated = true)             AS escalated_count,
+         COUNT(*) FILTER (WHERE urgency = 'emergency')           AS critical_count,
+         COUNT(*) FILTER (WHERE urgency = 'high')                AS high_count,
          COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS last_24h,
-         COUNT(*)                                        AS total
+         COUNT(*)                                                AS total
        FROM complaints`
     );
-    res.json({ stats: rows[0] });
+    const raw = rows[0] || {};
+    res.json({
+      stats: {
+        ...raw,
+        open: Number(raw.open_count || 0),
+        critical: Number(raw.critical_count || 0),
+        in_progress: Number(raw.in_progress_count || 0),
+        resolved: Number(raw.resolved_count || 0),
+        escalated: Number(raw.escalated_count || 0)
+      }
+    });
   } catch (err) {
     console.error('[complaints] getComplaintStats:', err.message);
     res.status(500).json({ error: 'Failed to load stats' });

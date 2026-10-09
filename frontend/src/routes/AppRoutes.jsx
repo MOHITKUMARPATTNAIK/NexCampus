@@ -251,7 +251,7 @@ export const AppRoutes = () => {
         <Route
           path="security/scanner"
           element={
-            <ProtectedRoute allowedRoles={['super_admin', 'delegated_admin', 'staff']}>
+            <ProtectedRoute allowedRoles={['super_admin', 'delegated_admin', 'security_guard', 'staff']}>
               <GuardQRScanner />
             </ProtectedRoute>
           }
@@ -259,7 +259,7 @@ export const AppRoutes = () => {
         <Route
           path="security/movements"
           element={
-            <ProtectedRoute allowedRoles={['super_admin', 'delegated_admin', 'staff']}>
+            <ProtectedRoute allowedRoles={['super_admin', 'delegated_admin', 'security_guard', 'staff']}>
               <GateMovements />
             </ProtectedRoute>
           }
@@ -267,7 +267,7 @@ export const AppRoutes = () => {
         <Route
           path="security/overdue"
           element={
-            <ProtectedRoute allowedRoles={['super_admin', 'delegated_admin', 'staff']}>
+            <ProtectedRoute allowedRoles={['super_admin', 'delegated_admin', 'security_guard', 'staff', 'hostel_warden']}>
               <OverdueMonitor />
             </ProtectedRoute>
           }

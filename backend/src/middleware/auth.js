@@ -184,7 +184,7 @@ export const requireCMO = (req, res, next) => {
     return res.status(401).json({ success: false, message: 'Unauthenticated' });
   }
 
-  if (req.user.isSuperAdmin || req.user.isCMO) {
+  if (req.user.isSuperAdmin || req.user.isCMO || req.user.roles?.includes('delegated_admin')) {
     return next();
   }
 

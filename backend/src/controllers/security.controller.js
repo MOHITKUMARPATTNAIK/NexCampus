@@ -105,12 +105,83 @@ export const getMyGatePasses = async (req, res) => {
   }
 };
 
+export const cancelGatePass = async (req, res) => {
+  const { passId } = req.params;
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const passRes = await client.query('SELECT * FROM gate_passes WHERE id = $1 FOR UPDATE', [passId]);
+    if (passRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Gate pass not found.' });
+    }
+    const pass = passRes.rows[0];
+
+    // Confirm ownership
+    if (pass.student_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, message: 'Unauthorized: You can only cancel your own gate pass requests.' });
+    }
+
+    // Allow cancellation only for eligible statuses (pending or approved before departure)
+    const cancellableStatuses = ['pending', 'approved'];
+    if (!cancellableStatuses.includes(pass.status)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel gate pass with status '${pass.status}'. Only pending or approved passes before departure can be cancelled.`
+      });
+    }
+
+    // Update status to 'revoked' (allowed status in database schema)
+    await client.query(
+      `UPDATE gate_passes 
+       SET status = 'revoked', updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $1`,
+      [passId]
+    );
+
+    // Revoke QR token if one was issued
+    await client.query(
+      `UPDATE gate_pass_tokens 
+       SET is_revoked = true 
+       WHERE gate_pass_id = $1`,
+      [passId]
+    );
+
+    await client.query('COMMIT');
+
+    await logAudit({
+      userId: req.user.id,
+      action: 'GATE_PASS_CANCELLED',
+      module: 'security',
+      targetRecordId: passId,
+      details: { passNumber: pass.pass_number, previousStatus: pass.status },
+      ipAddress: req.ip
+    });
+
+    return res.json({
+      success: true,
+      message: 'Gate pass cancelled successfully.',
+      status: 'revoked'
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[CancelGatePass Error]:', err);
+    return res.status(500).json({ success: false, message: 'Failed to cancel gate pass: ' + err.message });
+  } finally {
+    client.release();
+  }
+};
+
 // ==========================================
 // 2. APPROVER DECISION WORKFLOW
 // ==========================================
 
 export const listPendingGatePasses = async (req, res) => {
-  const { status = 'pending' } = req.query;
+  const { status } = req.query;
   try {
     let queryStr = `
       SELECT 
@@ -118,7 +189,9 @@ export const listPendingGatePasses = async (req, res) => {
         u.full_name as student_name, u.email as student_email, u.phone as student_phone,
         sp.student_id as roll_number, sp.hostel_name, sp.room_number,
         d.name as department_name,
-        approver.full_name as approver_name
+        approver.full_name as approver_name,
+        approver.full_name as reviewed_by_name,
+        gp.approved_at as reviewed_at
       FROM gate_passes gp
       JOIN users u ON gp.student_id = u.id
       JOIN student_profiles sp ON u.id = sp.user_id
@@ -127,29 +200,37 @@ export const listPendingGatePasses = async (req, res) => {
     `;
     const params = [];
 
-    if (status) {
-      queryStr += ' WHERE gp.status = $1';
-      params.push(status);
+    if (status && status !== 'all') {
+      const statuses = Array.isArray(status) ? status : status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        queryStr += ' WHERE gp.status = $1';
+        params.push(statuses[0]);
+      } else if (statuses.length > 1) {
+        queryStr += ' WHERE gp.status = ANY($1)';
+        params.push(statuses);
+      }
     }
 
-    queryStr += ' ORDER BY gp.departure_time ASC;';
+    queryStr += ' ORDER BY gp.created_at DESC, gp.departure_time ASC;';
 
     const result = await query(queryStr, params);
     return res.json({ success: true, passes: result.rows });
   } catch (err) {
+    console.error('[ListPendingGatePasses Error]:', err);
     return res.status(500).json({ success: false, message: 'Failed to list gate passes.' });
   }
 };
 
 export const reviewGatePass = async (req, res) => {
   const { passId } = req.params;
-  const { verdict, rejectionReason } = req.body;
+  const verdict = req.body.verdict;
+  const rejectionReason = (req.body.rejectionReason || req.body.rejection_reason || '').trim();
 
   if (!['approved', 'rejected'].includes(verdict)) {
     return res.status(400).json({ success: false, message: "Verdict must be 'approved' or 'rejected'." });
   }
 
-  if (verdict === 'rejected' && (!rejectionReason || !rejectionReason.trim())) {
+  if (verdict === 'rejected' && !rejectionReason) {
     return res.status(400).json({ success: false, message: 'Rejection reason is mandatory when denying gate pass.' });
   }
 
@@ -170,7 +251,7 @@ export const reviewGatePass = async (req, res) => {
        SET status = $1, approver_id = $2, approved_at = CURRENT_TIMESTAMP, 
            rejection_reason = $3, updated_at = CURRENT_TIMESTAMP
        WHERE id = $4`,
-      [verdict, req.user.id, verdict === 'rejected' ? rejectionReason.trim() : null, passId]
+      [verdict, req.user.id, verdict === 'rejected' ? rejectionReason : null, passId]
     );
 
     // If approved, generate unique cryptographic token for QR
@@ -230,11 +311,14 @@ export const reviewGatePass = async (req, res) => {
 // ==========================================
 
 export const verifyPassToken = async (req, res) => {
-  const { qrToken, passNumber, gateId } = req.body;
+  const qrToken = req.body.qrToken || req.body.token;
+  const passNumber = req.body.passNumber || req.body.pass_number;
+  const gateId = req.body.gateId || req.body.gate_id;
 
   if (!qrToken && !passNumber) {
     return res.status(400).json({
       success: false,
+      valid: false,
       message: 'Please provide either a QR token string or Gate Pass Number.'
     });
   }
@@ -282,6 +366,7 @@ export const verifyPassToken = async (req, res) => {
 
       return res.status(404).json({
         success: false,
+        valid: false,
         scanResult: 'invalid',
         message: 'Invalid or forged Gate Pass QR Code. Not recognized in institutional registry.'
       });
@@ -298,6 +383,7 @@ export const verifyPassToken = async (req, res) => {
       );
       return res.status(403).json({
         success: false,
+        valid: false,
         scanResult: 'revoked',
         message: 'This Gate Pass has been REVOKED by Campus Administration.',
         pass
@@ -315,6 +401,7 @@ export const verifyPassToken = async (req, res) => {
       );
       return res.status(400).json({
         success: false,
+        valid: false,
         scanResult: 'expired',
         message: 'Gate Pass has EXPIRED. Permitted movement window has passed.',
         pass
@@ -330,6 +417,7 @@ export const verifyPassToken = async (req, res) => {
       );
       return res.status(400).json({
         success: false,
+        valid: false,
         scanResult: 'already_used',
         message: 'Gate Pass has ALREADY BEEN COMPLETED. Student has returned.',
         pass
@@ -353,6 +441,7 @@ export const verifyPassToken = async (req, res) => {
 
     return res.json({
       success: true,
+      valid: true,
       scanResult: 'valid',
       nextAllowedAction,
       message: `Verified valid pass for student ${pass.student_name}. Ready for ${nextAllowedAction?.toUpperCase()}.`,
@@ -383,7 +472,18 @@ export const verifyPassToken = async (req, res) => {
 };
 
 export const recordGateMovement = async (req, res) => {
-  const { passId, movementType, gateId, remarks } = req.body;
+  let { passId, movementType, gateId, remarks, token, qrToken } = req.body;
+  const tokenVal = token || qrToken;
+
+  if (!passId && tokenVal) {
+    const tokenLookup = await query(
+      `SELECT gate_pass_id FROM gate_pass_tokens WHERE qr_token = $1`,
+      [tokenVal.trim()]
+    );
+    if (tokenLookup.rows.length > 0) {
+      passId = tokenLookup.rows[0].gate_pass_id;
+    }
+  }
 
   if (!passId || !['checkout', 'checkin'].includes(movementType)) {
     return res.status(400).json({

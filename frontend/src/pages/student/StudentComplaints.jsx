@@ -41,7 +41,7 @@ export default function StudentComplaints() {
       setComplaints(compRes.data.complaints || []);
       setCategories(catRes.data.categories || []);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to load complaints');
+      setError(err.response?.data?.error || err.response?.data?.message || 'Failed to load complaints');
     } finally {
       setLoading(false);
     }
@@ -57,7 +57,7 @@ export default function StudentComplaints() {
       setForm({ category_id: '', title: '', description: '', location: '', priority: 'medium' });
       loadData();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to submit complaint');
+      setError(err.response?.data?.error || err.response?.data?.message || 'Failed to submit complaint');
     } finally {
       setSubmitting(false);
     }

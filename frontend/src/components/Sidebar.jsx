@@ -82,11 +82,11 @@ export const Sidebar = () => {
 
   const isSuperAdmin = user.isSuperAdmin;
   const isCMO = user.isCMO;
-  const isStudent = user.roles.includes('student');
-  const isFaculty = user.roles.includes('faculty');
-  const isGuard = user.roles.includes('security_guard');
-  const isStaff = user.roles.some((r) => ['hostel_warden', 'mess_staff', 'maintenance_staff'].includes(r));
-  const isDelegatedAdmin = user.roles.includes('delegated_admin');
+  const isStudent = user.roles?.includes('student') || user.role === 'student';
+  const isFaculty = user.roles?.includes('faculty') || user.role === 'faculty';
+  const isGuard = user.roles?.includes('security_guard') || user.role === 'security_guard';
+  const isStaff = user.roles?.some((r) => ['hostel_warden', 'mess_staff', 'maintenance_staff'].includes(typeof r === 'string' ? r : r?.name));
+  const isDelegatedAdmin = user.roles?.includes('delegated_admin') || user.role === 'delegated_admin';
 
   const handleLinkClick = () => {
     if (isMobile) {
@@ -151,7 +151,7 @@ export const Sidebar = () => {
       )}
 
       {/* Security Guard Section */}
-      {(isGuard || isSuperAdmin) && (
+      {(isGuard || isSuperAdmin || isDelegatedAdmin) && (
         <div>
           <SectionHeader title={t('sidebar.physicalSecurity', 'Physical Security')} isCollapsed={collapsed} color="text-emerald-600" />
           <nav className="flex flex-col gap-1">

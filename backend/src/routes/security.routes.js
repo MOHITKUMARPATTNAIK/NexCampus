@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   requestGatePass,
   getMyGatePasses,
+  cancelGatePass,
   listPendingGatePasses,
   reviewGatePass,
   verifyPassToken,
@@ -19,6 +20,7 @@ router.use(authenticate);
 // Student Gate Pass Requests
 router.post('/gate-passes/request', requireRole(['student']), requestGatePass);
 router.get('/gate-passes/my-passes', requireRole(['student']), getMyGatePasses);
+router.patch('/gate-passes/:passId/cancel', requireRole(['student']), cancelGatePass);
 
 // Approver Decision Workflow (Warden, Faculty, Admin)
 router.get('/gate-passes/pending', requireRole(['super_admin', 'delegated_admin', 'faculty', 'hostel_warden']), listPendingGatePasses);

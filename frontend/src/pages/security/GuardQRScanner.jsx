@@ -29,6 +29,12 @@ export default function GuardQRScanner() {
     }
   };
 
+  const isPassValid = (res) => {
+    if (!res) return false;
+    if (res.valid !== undefined) return Boolean(res.valid);
+    return res.scanResult === 'valid' || Boolean(res.success && res.scanResult !== 'invalid');
+  };
+
   const handleVerify = async (e) => {
     e.preventDefault();
     if (!tokenInput.trim()) return;
@@ -37,33 +43,49 @@ export default function GuardQRScanner() {
     setError('');
     setSuccessMsg('');
     try {
-      const res = await api.post('/security/verification/verify-token', { token: tokenInput.trim() });
-      setVerifyResult(res.data);
+      const tokenVal = tokenInput.trim();
+      const res = await api.post('/security/verification/verify-token', {
+        token: tokenVal,
+        qrToken: tokenVal
+      });
+      const data = res.data;
+      const isValid = isPassValid(data);
+      setVerifyResult({
+        ...data,
+        valid: isValid
+      });
     } catch (err) {
-      const msg = err.response?.data?.error || 'Verification failed';
-      setVerifyResult({ valid: false, errorMessage: msg });
+      const msg = err.response?.data?.message || err.response?.data?.error || 'Verification failed';
+      setVerifyResult({ valid: false, scanResult: 'invalid', errorMessage: msg });
     } finally {
       setVerifying(false);
     }
   };
 
   const handleRecordMovement = async (movementType) => {
-    if (!verifyResult?.pass) return;
+    const verifiedPassId = verifyResult?.pass?.id || verifyResult?.pass?.pass_id;
+    if (!verifiedPassId) {
+      setError('Cannot record movement: No verified pass ID found.');
+      return;
+    }
     setMovementLoading(true);
     setError('');
     setSuccessMsg('');
     try {
-      const res = await api.post('/security/verification/record-movement', {
-        token: tokenInput.trim(),
+      const tokenVal = tokenInput.trim();
+      await api.post('/security/verification/record-movement', {
+        passId: verifiedPassId,
         movementType,
-        gateId: verifyResult.pass.gate_id || null
+        gateId: verifyResult.pass?.gate_id || verifyResult.gateId || null,
+        token: tokenVal,
+        qrToken: tokenVal
       });
       setSuccessMsg(`${movementType === 'checkout' ? 'Checkout' : 'Check-in'} recorded successfully at ${new Date().toLocaleTimeString()}`);
       setVerifyResult(null);
       setTokenInput('');
       loadRecentMovements();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to record movement');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to record movement');
     } finally {
       setMovementLoading(false);
     }
@@ -71,14 +93,14 @@ export default function GuardQRScanner() {
 
   const getResultColor = () => {
     if (!verifyResult) return '';
-    if (!verifyResult.valid) return 'border-red-500 bg-red-50';
+    if (!isPassValid(verifyResult)) return 'border-red-500 bg-red-50';
     if (verifyResult.nextAllowedAction === 'checkin') return 'border-green-500 bg-green-50';
     return 'border-blue-500 bg-blue-50';
   };
 
   const getResultIcon = () => {
     if (!verifyResult) return null;
-    if (!verifyResult.valid) return <XCircle className="w-10 h-10 text-red-500" />;
+    if (!isPassValid(verifyResult)) return <XCircle className="w-10 h-10 text-red-500" />;
     return <CheckCircle className="w-10 h-10 text-green-500" />;
   };
 
@@ -150,7 +172,7 @@ export default function GuardQRScanner() {
           <div className="flex items-start gap-4">
             {getResultIcon()}
             <div className="flex-1">
-              {!verifyResult.valid ? (
+              {!isPassValid(verifyResult) ? (
                 <div>
                   <h2 className="text-xl font-bold text-red-700">ACCESS DENIED</h2>
                   <p className="text-red-600 mt-1">{verifyResult.errorMessage || verifyResult.message}</p>

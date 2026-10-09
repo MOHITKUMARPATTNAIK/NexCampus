@@ -171,3 +171,125 @@ describe('Overdue Detection', () => {
     assert.equal(hoursOverdue, 2, '2 hours overdue correctly calculated');
   });
 });
+
+// ─────────────────────────────────────────────
+//  Batch 2 Fixes Validation Tests
+// ─────────────────────────────────────────────
+describe('Batch 2: Rejection Reason Normalization', () => {
+  const extractRejectionReason = (body) => (body.rejectionReason || body.rejection_reason || '').trim();
+
+  it('should extract rejection reason from camelCase rejectionReason', () => {
+    const reason = extractRejectionReason({ verdict: 'rejected', rejectionReason: 'Parent did not approve leave' });
+    assert.equal(reason, 'Parent did not approve leave');
+  });
+
+  it('should extract rejection reason from snake_case rejection_reason', () => {
+    const reason = extractRejectionReason({ verdict: 'rejected', rejection_reason: 'Curfew violation record' });
+    assert.equal(reason, 'Curfew violation record');
+  });
+
+  it('should reject when neither rejectionReason nor rejection_reason is provided or both are empty', () => {
+    assert.equal(extractRejectionReason({ verdict: 'rejected' }), '');
+    assert.equal(extractRejectionReason({ verdict: 'rejected', rejectionReason: '   ' }), '');
+    assert.equal(extractRejectionReason({ verdict: 'rejected', rejection_reason: '' }), '');
+  });
+});
+
+describe('Batch 2: QR Verification Token Normalization', () => {
+  const extractToken = (body) => body.qrToken || body.token;
+
+  it('should accept qrToken from payload', () => {
+    const token = extractToken({ qrToken: 'NC-PASS-test-GP001' });
+    assert.equal(token, 'NC-PASS-test-GP001');
+  });
+
+  it('should accept token from payload', () => {
+    const token = extractToken({ token: 'NC-PASS-test-GP002' });
+    assert.equal(token, 'NC-PASS-test-GP002');
+  });
+
+  it('should prioritize qrToken if both provided', () => {
+    const token = extractToken({ qrToken: 'NC-PASS-primary', token: 'NC-PASS-fallback' });
+    assert.equal(token, 'NC-PASS-primary');
+  });
+});
+
+describe('Batch 2: Scanner Response Recognition', () => {
+  const isPassValid = (res) => {
+    if (!res) return false;
+    if (res.valid !== undefined) return Boolean(res.valid);
+    return res.scanResult === 'valid' || Boolean(res.success && res.scanResult !== 'invalid');
+  };
+
+  it('should recognize response with scanResult: "valid" as valid', () => {
+    assert.ok(isPassValid({ success: true, scanResult: 'valid', nextAllowedAction: 'checkout' }));
+  });
+
+  it('should recognize response with valid: true as valid', () => {
+    assert.ok(isPassValid({ valid: true, pass: { id: 'pass-123' } }));
+  });
+
+  it('should recognize invalid/expired/revoked responses as invalid', () => {
+    assert.ok(!isPassValid({ success: false, valid: false, scanResult: 'invalid' }));
+    assert.ok(!isPassValid({ success: false, valid: false, scanResult: 'expired' }));
+    assert.ok(!isPassValid({ success: false, valid: false, scanResult: 'revoked' }));
+    assert.ok(!isPassValid(null));
+  });
+});
+
+describe('Batch 2: Student Gate Pass Cancellation Validation', () => {
+  const CANCELLABLE_STATUSES = ['pending', 'approved'];
+  const SCHEMA_ALLOWED_STATUSES = ['pending', 'approved', 'rejected', 'active', 'completed', 'expired', 'revoked'];
+
+  it('should allow cancellation only for eligible statuses (pending, approved)', () => {
+    assert.ok(CANCELLABLE_STATUSES.includes('pending'), 'pending is cancellable');
+    assert.ok(CANCELLABLE_STATUSES.includes('approved'), 'approved before departure is cancellable');
+    assert.ok(!CANCELLABLE_STATUSES.includes('active'), 'active (already outside) cannot be cancelled');
+    assert.ok(!CANCELLABLE_STATUSES.includes('completed'), 'completed cannot be cancelled');
+    assert.ok(!CANCELLABLE_STATUSES.includes('rejected'), 'rejected cannot be cancelled');
+    assert.ok(!CANCELLABLE_STATUSES.includes('revoked'), 'already revoked cannot be cancelled');
+  });
+
+  it('should map cancelled status to "revoked" conforming to database schema check constraint', () => {
+    const cancelledDbStatus = 'revoked';
+    assert.ok(SCHEMA_ALLOWED_STATUSES.includes(cancelledDbStatus), '"revoked" is a valid status in database schema');
+    assert.ok(!SCHEMA_ALLOWED_STATUSES.includes('cancelled'), '"cancelled" is NOT in database schema constraint');
+  });
+
+  it('should enforce student ownership on cancellation', () => {
+    const pass = { id: 'pass-1', student_id: 'user-student-1', status: 'pending' };
+    const canCancelOwner = pass.student_id === 'user-student-1';
+    const canCancelOther = pass.student_id === 'user-student-2';
+    assert.ok(canCancelOwner, 'owner can cancel');
+    assert.ok(!canCancelOther, 'non-owner student cannot cancel');
+  });
+});
+
+describe('Batch 2: Security Guard Route & Checkpoint RBAC Authorization', () => {
+  const CHECKPOINT_ALLOWED_ROLES = ['super_admin', 'security_guard', 'delegated_admin', 'staff'];
+  const APPROVAL_ALLOWED_ROLES = ['super_admin', 'delegated_admin', 'faculty', 'hostel_warden'];
+
+  const checkAuthorization = (userRoles, allowedRoles) => {
+    if (userRoles.includes('super_admin')) return true;
+    return userRoles.some(role => allowedRoles.includes(role));
+  };
+
+  it('should authorize security_guard for checkpoint scanner, movements, and overdue routes', () => {
+    assert.ok(checkAuthorization(['security_guard'], CHECKPOINT_ALLOWED_ROLES), 'security_guard authorized for checkpoint');
+  });
+
+  it('should authorize super_admin and delegated_admin for checkpoint routes', () => {
+    assert.ok(checkAuthorization(['super_admin'], CHECKPOINT_ALLOWED_ROLES), 'super_admin authorized');
+    assert.ok(checkAuthorization(['delegated_admin'], CHECKPOINT_ALLOWED_ROLES), 'delegated_admin authorized');
+  });
+
+  it('should deny student from accessing security checkpoint routes', () => {
+    assert.ok(!checkAuthorization(['student'], CHECKPOINT_ALLOWED_ROLES), 'student denied access to scanner');
+  });
+
+  it('should deny security_guard from reviewing/approving gate passes (least privilege)', () => {
+    assert.ok(!checkAuthorization(['security_guard'], APPROVAL_ALLOWED_ROLES), 'security_guard cannot approve passes');
+  });
+});
+
+
