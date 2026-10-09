@@ -1079,7 +1079,7 @@ export const getDashboardMetrics = async (req, res) => {
       query("SELECT COUNT(*) FROM gate_movements WHERE recorded_at >= CURRENT_DATE"),
       query("SELECT COUNT(*) FILTER (WHERE status = 'open') AS open, COUNT(*) FILTER (WHERE priority = 'critical') AS critical, COUNT(*) FILTER (WHERE status = 'resolved') AS resolved FROM complaints"),
       query("SELECT COALESCE(SUM(amount_paid), 0) AS collected, COALESCE(SUM(amount_due - COALESCE(amount_paid, 0)), 0) AS outstanding FROM fee_invoices WHERE status != 'cancelled'"),
-      query("SELECT COUNT(*) FROM notices WHERE status = 'published' AND (expires_at IS NULL OR expires_at > NOW())")
+      query("SELECT COUNT(*) FROM notices WHERE is_published = true AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE)")
     ]);
 
     return res.json({

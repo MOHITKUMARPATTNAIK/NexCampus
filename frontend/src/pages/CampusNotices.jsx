@@ -50,7 +50,7 @@ export default function CampusNotices() {
       const res = await api.get('/notices', { params });
       setNotices(res.data.notices || []);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to load notices');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to load notices');
     } finally {
       setLoading(false);
     }
@@ -66,7 +66,7 @@ export default function CampusNotices() {
       setForm({ title: '', content: '', notice_type: 'general', priority: 'normal', is_pinned: false, expires_at: '' });
       loadNotices();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to publish notice');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to publish notice');
     } finally {
       setSubmitting(false);
     }
@@ -80,7 +80,7 @@ export default function CampusNotices() {
       setSelectedNotice(null);
       loadNotices();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to archive notice');
+      setError(err.response?.data?.message || err.response?.data?.error || 'Failed to archive notice');
     }
   };
 

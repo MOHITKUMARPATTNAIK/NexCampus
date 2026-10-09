@@ -7,30 +7,55 @@ import { logAudit } from '../utils/auditLogger.js';
 
 /** POST /api/notices — publish a notice */
 export const publishNotice = async (req, res) => {
-  const { title, content, notice_type, target_audience, department_id, priority, expires_at, is_pinned } = req.body;
+  const { title, content, notice_type, target_audience, target_role, department_id, priority, expires_at, expiry_date, is_pinned } = req.body;
   if (!title?.trim() || !content?.trim()) {
     return res.status(400).json({ error: 'Title and content are required' });
   }
+
+  const audience = target_role || target_audience || 'all';
+  const noticeType = notice_type || 'general';
+  const noticePriority = priority || 'normal';
+  const rawExpiry = expiry_date || expires_at;
+  const expiry = rawExpiry && typeof rawExpiry === 'string' && rawExpiry.trim() ? rawExpiry.trim() : (rawExpiry || null);
+
   try {
     const { rows } = await pool.query(
       `INSERT INTO notices
-         (title, content, notice_type, target_audience, department_id, priority,
-          expires_at, is_pinned, published_by, status)
-       VALUES ($1,$2,$3,COALESCE($4,'all'),$5,COALESCE($6,'normal'),$7,COALESCE($8,false),$9,'published')
-       RETURNING *`,
-      [title.trim(), content.trim(), notice_type || 'general', target_audience, department_id || null,
-       priority, expires_at || null, is_pinned, req.user.id]
+         (title, content, notice_type, target_role, department_id, priority,
+          expiry_date, is_pinned, author_id, is_published)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, false), $9, true)
+       RETURNING *,
+         author_id AS published_by,
+         target_role AS target_audience,
+         expiry_date AS expires_at,
+         CASE WHEN is_published THEN 'published' ELSE 'archived' END AS status`,
+      [
+        title.trim(),
+        content.trim(),
+        noticeType,
+        audience,
+        department_id || null,
+        noticePriority,
+        expiry,
+        is_pinned,
+        req.user.id
+      ]
     );
+
     // Create notifications for all active users (async — best effort)
     pool.query(
-      `INSERT INTO notifications (user_id, title, message, notification_type, reference_id, reference_type)
-       SELECT u.id, $1, $2, 'notice', $3, 'notice'
+      `INSERT INTO notifications (user_id, title, message, category, notification_type, reference_id, reference_type)
+       SELECT u.id, $1, $2, 'notice', 'notice', $3, 'notice'
        FROM users u WHERE u.is_active = true AND u.id != $4`,
       [`Notice: ${title.trim()}`, content.trim().slice(0, 200), rows[0].id, req.user.id]
     ).catch(err => console.warn('[notices] Notification fan-out failed:', err.message));
 
     await logAudit({ actorId: req.user.id, action: 'NOTICE_PUBLISH', targetType: 'notice', targetId: rows[0].id, details: { title } });
-    res.status(201).json({ notice: rows[0] });
+    const createdNotice = {
+      ...rows[0],
+      published_by_name: req.user.full_name || 'Campus Administration'
+    };
+    res.status(201).json({ notice: createdNotice });
   } catch (err) {
     console.error('[notices] publishNotice:', err.message);
     res.status(500).json({ error: 'Failed to publish notice' });
@@ -41,20 +66,36 @@ export const publishNotice = async (req, res) => {
 export const listNotices = async (req, res) => {
   const { type, pinned, page = 1, limit = 30 } = req.query;
   try {
-    const conditions = [`(n.expires_at IS NULL OR n.expires_at > NOW())`, `n.status = 'published'`];
+    const conditions = [
+      `(n.expiry_date IS NULL OR n.expiry_date >= CURRENT_DATE)`,
+      `n.is_published = true`
+    ];
     const values = [];
     let idx = 1;
-    if (type)   { conditions.push(`n.notice_type = $${idx++}`); values.push(type); }
-    if (pinned === 'true') { conditions.push(`n.is_pinned = true`); }
+    if (type) {
+      conditions.push(`n.notice_type = $${idx++}`);
+      values.push(type);
+    }
+    if (pinned === 'true') {
+      conditions.push(`n.is_pinned = true`);
+    }
 
     const offset = (Number(page) - 1) * Number(limit);
     const { rows } = await pool.query(
-      `SELECT n.*, u.full_name AS published_by_name, d.name AS department_name
+      `SELECT n.*,
+              n.author_id AS published_by,
+              n.target_role AS target_audience,
+              n.expiry_date AS expires_at,
+              'published' AS status,
+              COALESCE(u.full_name, 'Campus Administration') AS published_by_name,
+              d.name AS department_name
        FROM notices n
-       JOIN users u ON u.id = n.published_by
+       LEFT JOIN users u ON u.id = n.author_id
        LEFT JOIN departments d ON d.id = n.department_id
        WHERE ${conditions.join(' AND ')}
-       ORDER BY n.is_pinned DESC, n.priority DESC, n.created_at DESC
+       ORDER BY n.is_pinned DESC,
+         CASE n.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'normal' THEN 2 WHEN 'low' THEN 1 ELSE 2 END DESC,
+         n.created_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
       [...values, Number(limit), offset]
     );
@@ -69,8 +110,14 @@ export const listNotices = async (req, res) => {
 export const listAllNoticesAdmin = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT n.*, u.full_name AS published_by_name
-       FROM notices n JOIN users u ON u.id = n.published_by
+      `SELECT n.*,
+              n.author_id AS published_by,
+              n.target_role AS target_audience,
+              n.expiry_date AS expires_at,
+              CASE WHEN n.is_published THEN 'published' ELSE 'archived' END AS status,
+              COALESCE(u.full_name, 'Campus Administration') AS published_by_name
+       FROM notices n
+       LEFT JOIN users u ON u.id = n.author_id
        ORDER BY n.created_at DESC LIMIT 100`
     );
     res.json({ notices: rows });
@@ -83,7 +130,15 @@ export const listAllNoticesAdmin = async (req, res) => {
 export const getNotice = async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT n.*, u.full_name AS published_by_name FROM notices n JOIN users u ON u.id = n.published_by WHERE n.id = $1`,
+      `SELECT n.*,
+              n.author_id AS published_by,
+              n.target_role AS target_audience,
+              n.expiry_date AS expires_at,
+              CASE WHEN n.is_published THEN 'published' ELSE 'archived' END AS status,
+              COALESCE(u.full_name, 'Campus Administration') AS published_by_name
+       FROM notices n
+       LEFT JOIN users u ON u.id = n.author_id
+       WHERE n.id = $1`,
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Notice not found' });
@@ -95,21 +150,36 @@ export const getNotice = async (req, res) => {
 
 /** PATCH /api/notices/:id — update notice */
 export const updateNotice = async (req, res) => {
-  const { title, content, status, is_pinned, expires_at } = req.body;
+  const { title, content, status, is_published, is_pinned, expires_at, expiry_date, notice_type, priority } = req.body;
+  const publishedBool = status !== undefined ? (status === 'published') : (is_published !== undefined ? Boolean(is_published) : null);
+  const rawExpiry = expiry_date || expires_at;
+  const expiry = rawExpiry && typeof rawExpiry === 'string' && rawExpiry.trim() ? rawExpiry.trim() : (rawExpiry || null);
+
   try {
     const { rows } = await pool.query(
       `UPDATE notices SET
-         title      = COALESCE($1, title),
-         content    = COALESCE($2, content),
-         status     = COALESCE($3, status),
-         is_pinned  = COALESCE($4, is_pinned),
-         expires_at = COALESCE($5, expires_at),
-         updated_at = NOW()
-       WHERE id = $6 RETURNING *`,
-      [title || null, content || null, status || null, is_pinned ?? null, expires_at || null, req.params.id]
+         title        = COALESCE($1, title),
+         content      = COALESCE($2, content),
+         is_published = COALESCE($3, is_published),
+         is_pinned    = COALESCE($4, is_pinned),
+         expiry_date  = COALESCE($5, expiry_date),
+         notice_type  = COALESCE($6, notice_type),
+         priority     = COALESCE($7, priority),
+         updated_at   = NOW()
+       WHERE id = $8
+       RETURNING *,
+         author_id AS published_by,
+         target_role AS target_audience,
+         expiry_date AS expires_at,
+         CASE WHEN is_published THEN 'published' ELSE 'archived' END AS status`,
+      [title?.trim() || null, content?.trim() || null, publishedBool, is_pinned ?? null, expiry, notice_type || null, priority || null, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Notice not found' });
-    res.json({ notice: rows[0] });
+    const updatedNotice = {
+      ...rows[0],
+      published_by_name: req.user.full_name || 'Campus Administration'
+    };
+    res.json({ notice: updatedNotice });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update notice' });
   }
@@ -118,7 +188,8 @@ export const updateNotice = async (req, res) => {
 /** DELETE /api/notices/:id — archive notice */
 export const archiveNotice = async (req, res) => {
   try {
-    await pool.query(`UPDATE notices SET status = 'archived', updated_at = NOW() WHERE id = $1`, [req.params.id]);
+    const { rows } = await pool.query(`UPDATE notices SET is_published = false, updated_at = NOW() WHERE id = $1 RETURNING id`, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Notice not found' });
     res.json({ message: 'Notice archived' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to archive notice' });
